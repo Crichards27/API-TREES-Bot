@@ -40,3 +40,7 @@ Use `py play_trees.py --help` for manual commands, or `py play_trees.py --guide`
 Use the host's address, not `localhost`. Different networks need a reachable VPN address or public game URL. Team tokens are saved in your home folder under `.api_trees`; keep them private.
 
 The script uses the same API in the original and starting-plot-fixed versions. The server must be running successfully. The bot farms and defends automatically; attacks are manual. Winning is not guaranteed.
+
+Built against I-Make-Stuff/API-Trees commit b353df8aba3db86d911f8e42c50eb6117e77d992 (2026-10-05)
+
+Source: https://github.com/I-Make-Stuff/API-Trees

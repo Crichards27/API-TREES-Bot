@@ -1,0 +1,3 @@
+Optional local developer host for the shared MAUI Razor components.
+This host stores team sessions in memory; closing/reloading the page loses them.
+Use the native MAUI application or CLI for persistent sessions.

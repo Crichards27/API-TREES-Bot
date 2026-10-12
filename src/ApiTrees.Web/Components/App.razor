@@ -1,0 +1,18 @@
+@using Microsoft.AspNetCore.Components.Web
+@using ApiTrees.Ui
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <link rel="stylesheet" href="_content/ApiTrees.Ui/app.css" />
+    <HeadOutlet @rendermode="RenderMode.InteractiveServer" />
+    <title>API Trees Bot — developer preview</title>
+</head>
+<body>
+    <Dashboard @rendermode="RenderMode.InteractiveServer" />
+    <div id="blazor-error-ui">An unexpected UI error occurred. <a href="">Reload</a></div>
+    <script src="_framework/blazor.web.js"></script>
+</body>
+</html>

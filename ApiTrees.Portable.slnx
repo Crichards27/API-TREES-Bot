@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ApiTrees.Cli/ApiTrees.Cli.csproj" />
+    <Project Path="src/ApiTrees.Core/ApiTrees.Core.csproj" />
+    <Project Path="src/ApiTrees.Ui/ApiTrees.Ui.csproj" />
+    <Project Path="src/ApiTrees.Web/ApiTrees.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ApiTrees.Tests/ApiTrees.Tests.csproj" />
+  </Folder>
+</Solution>

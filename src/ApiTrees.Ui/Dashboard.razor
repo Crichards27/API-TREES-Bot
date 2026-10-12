@@ -1,0 +1,141 @@
+@page "/"
+@implements IDisposable
+@inject PlayerController Player
+@inject ICertificatePicker CertificatePicker
+
+<main>
+    <header>
+        <div class="brand"><span class="mark">🌳</span><div><h1>API Trees</h1><p>Your orchard. Under control.</p></div></div>
+        <span class="badge @(Player.Running ? "live" : "")">@(Player.Running ? "Bot running" : Player.Round?.Status ?? (Player.Connected ? "Round ended" : "Disconnected"))</span>
+    </header>
+    @if (Player.Error is not null)
+    {
+        <div class="error" role="alert">@Player.Error</div>
+    }
+    <div class="workspace">
+        <aside>
+            <section class="panel">
+                <h2>Connection</h2>
+                <fieldset disabled="@(Player.Busy || Player.Running)">
+                    <label>Game server<input @bind="server" placeholder="https://192.168.1.50" type="url" /></label>
+                    <label>Private CA certificate (optional)<input @bind="caPath" placeholder="Path to root.crt" /></label>
+                    <button class="secondary" @onclick="PickCertificate">Browse certificate</button>
+                    <label class="check"><input type="checkbox" @bind="insecure" /> Skip TLS verification (LAN testing)</label>
+                    <button class="primary full" @onclick="Connect">Connect / resume</button>
+                </fieldset>
+                <p class="hint">Use the host's reachable address. Team tokens are saved per server and never displayed.</p>
+            </section>
+            <section class="panel">
+                <h2>Team &amp; round</h2>
+                @if (Player.CurrentSession)
+                {
+                    <p class="team">@Player.Session!.Team <span class="hint">· Round @Player.Session.GameId</span></p>
+                    @if (Player.NeedsSessionSave)
+                    { <button class="primary full" disabled="@(Player.Busy || Player.Running)" @onclick="Player.SaveSessionAsync">Retry Save session</button> }
+                }
+                else
+                {
+                    <fieldset disabled="@(!Player.Connected || Player.Busy || Player.Running || Player.Round?.Status != "lobby")">
+                        <label>Available team<select @bind="team">
+                            <option value="">Choose a team</option>
+                            @foreach (var available in Player.Round?.Teams.Where(t => t.Available) ?? Enumerable.Empty<TeamAvailability>())
+                            { <option value="@available.Name">@available.Name</option> }
+                        </select></label>
+                        <button class="primary full" @onclick="() => Player.ClaimAsync(team)" disabled="@(string.IsNullOrEmpty(team))">Claim team</button>
+                    </fieldset>
+                    <p class="hint">Teams can be claimed only while the host is in the lobby.</p>
+                }
+                <button class="secondary full" disabled="@(!Player.Connected || Player.Busy || Player.Running)" @onclick="Player.RefreshAsync">Refresh orchard &amp; opponents</button>
+            </section>
+            <section class="panel">
+                <h2>Bot strategy</h2>
+                <fieldset disabled="@(Player.Running || Player.Busy)">
+                    <div class="pair"><label>Cycle (seconds)<input type="number" min="1" @bind="interval" /></label><label>Tree limit (0 = unlimited)<input type="number" min="0" @bind="maxTrees" /></label></div>
+                    <div class="pair"><label>Money reserve<input type="number" min="0" @bind="reserve" /></label><label>New plots per cycle<input type="number" min="1" @bind="batch" /></label></div>
+                    <label>Estimated seconds remaining (optional)<input type="number" min="1" @bind="roundSeconds" /></label>
+                    <label class="check"><input type="checkbox" @bind="bankOnly" /> Bank only: harvest &amp; defend</label>
+                    <p class="hint">An estimate starts when this run first sees an active game. Investment stops in its last 45 seconds. The host controls the actual ending.</p>
+                </fieldset>
+                <div class="pair">
+                    <button class="primary" disabled="@(!Player.CurrentSession || Player.Running || Player.Busy)" @onclick="Start">Start bot</button>
+                    <button class="danger" disabled="@(!Player.Running)" @onclick="Player.StopAsync">Stop bot</button>
+                </div>
+            </section>
+        </aside>
+        <div class="content">
+            <div class="stats">
+                <div class="stat"><span>Estimated score</span><strong>@(Player.Orchard?.EstimatedScore.ToString("N0") ?? "—")</strong></div>
+                <div class="stat"><span>Money</span><strong>@(Player.Orchard?.Inventory.Money.ToString("N0") ?? "—")</strong></div>
+                <div class="stat"><span>Fruit / seeds</span><strong>@(Player.Orchard is {} orchard ? $"{orchard.Inventory.Fruit:N0} / {orchard.Inventory.Seeds:N0}" : "—")</strong></div>
+                <div class="stat"><span>Trees / plots</span><strong>@(Player.Orchard is {} land ? $"{land.Trees.Count} / {land.Plots.Count}" : "—")</strong></div>
+            </div>
+            <section class="panel">
+                <div class="section-title"><h2>Your orchard</h2><span class="hint">Four columns · live server coordinates</span></div>
+                @if (Player.Orchard is {} farm)
+                {
+                    <div class="orchard">
+                        @foreach (var plot in farm.Plots.OrderBy(p => p.Row).ThenBy(p => p.Column))
+                        {
+                            var tree = farm.Trees.FirstOrDefault(t => t.Id == plot.TreeId);
+                            <div class="plot @(tree?.Status ?? "empty")" style="grid-column: @(plot.Column + 1); grid-row: @(plot.Row + 1)">
+                                <span class="plot-id">Plot #@plot.Id</span><span class="tree-icon">@(tree is null ? "＋" : tree.Status == "burning" ? "🔥" : tree.Status == "dead" ? "🪵" : "🌳")</span>
+                                <strong>@(tree?.Status ?? "empty")</strong><small>@(tree is null ? "Ready to plant" : $"{tree.BranchCount} branches · {tree.Fruit} fruit")</small>
+                                @if (tree?.Branches.Any(b => b.Status == "poisoned") == true) { <small class="poison">Poison detected</small> }
+                            </div>
+                        }
+                    </div>
+                    <details><summary>Tree &amp; branch IDs</summary><div class="table-wrap"><table><thead><tr><th>Tree / plot</th><th>State</th><th>Branches: ID · state · fruit</th></tr></thead><tbody>
+                        @foreach (var tree in farm.Trees)
+                        { <tr><td>#@tree.Id / #@tree.PlotId</td><td>@tree.Status</td><td>@string.Join(", ", tree.Branches.Select(b => $"#{b.Id} · {b.Status} · {b.Fruit}"))</td></tr> }
+                    </tbody></table></div></details>
+                    <p class="hint">Score estimate follows the server: money + fruit × 10 + every extant tree × 100. Dead trees are included.</p>
+                }
+                else { <div class="empty-state"><span>🌱</span><h3>Connect and claim your team</h3><p>Your plots, trees and resources will appear here.</p></div> }
+            </section>
+            <section class="panel">
+                <h2>Manual controls</h2>
+                <p class="hint">Stop the bot to make manual changes. Attacks are always manual.</p>
+                <fieldset disabled="@(!Player.CurrentSession || Player.Round?.Status != "active" || Player.Running || Player.Busy)">
+                    <div class="manual-row"><button class="secondary" @onclick='() => Player.ManualAsync("harvest")'>Harvest &amp; defend all</button><span class="hint">Poison: @(Player.Orchard?.Inventory.Poison ?? 0) · Molotovs: @(Player.Orchard?.Inventory.Molotov ?? 0)</span></div>
+                    <div class="manual-row"><label>Plot ID<input type="number" min="1" @bind="plotId" /></label><button class="secondary" @onclick='() => Player.ManualAsync("plant", plotId)'>Plant tree</button><label>Branch ID<input type="number" min="1" @bind="branchId" /></label><button class="secondary" @onclick='() => Player.ManualAsync("prune", branchId)'>Prune branch</button></div>
+                    <div class="manual-row"><label>Tree ID<input type="number" min="1" @bind="treeId" /></label><label class="check"><input type="checkbox" @bind="confirmDelete" /> Confirm removal</label><button class="danger" disabled="@(!confirmDelete)" @onclick="DeleteTree">Remove tree</button></div>
+                    <div class="manual-row"><label>Item<select @bind="buyItem"><option value="plot">Plot</option><option value="poison">Poison</option><option value="molotov">Molotov</option></select></label><label>Quantity<input type="number" min="1" @bind="buyQuantity" /></label><button class="secondary" @onclick='() => Player.ManualAsync("buy", amount: buyQuantity, item: buyItem)'>Buy</button></div>
+                    <div class="manual-row"><label>Convert fruit to<select @bind="convertTo"><option value="money">Money</option><option value="seeds">Seeds</option></select></label><label>Fruit amount<input type="number" min="1" @bind="convertAmount" /></label><button class="secondary" @onclick='() => Player.ManualAsync("convert", amount: convertAmount, item: convertTo)'>Convert</button></div>
+                    <div class="manual-row"><label>Enemy plot ID<input type="number" min="1" @bind="targetId" /></label><button class="danger" @onclick='() => Player.ManualAsync("poison", targetId)'>Use poison</button><button class="danger" @onclick='() => Player.ManualAsync("molotov", targetId)'>Throw molotov</button></div>
+                </fieldset>
+            </section>
+            @if (Player.Opponents.Count > 0)
+            {
+                <section class="panel"><h2>Opponents</h2><p class="hint">Snapshot from the public team API. Refresh while stopped to update. Some servers return older-round data; verify target IDs with the host.</p><div class="table-wrap"><table><thead><tr><th>Team</th><th>Money</th><th>Live trees</th><th>Plot IDs</th></tr></thead><tbody>
+                    @foreach (var opponent in Player.Opponents)
+                    { <tr><td>@opponent.Team</td><td>@opponent.Money</td><td>@opponent.Trees</td><td>@string.Join(", ", opponent.PlotIds)</td></tr> }
+                </tbody></table></div></section>
+            }
+            @if (Player.Results is {} results)
+            {
+                <section class="panel"><h2>Round @results.GameId results</h2><p>Winner@(results.Tie ? "s" : ""): <strong>@string.Join(", ", results.Winners)</strong></p><table><thead><tr><th>Place</th><th>Team</th><th>Score</th></tr></thead><tbody>
+                    @foreach (var standing in results.Standings) { <tr><td>@standing.Place</td><td>@standing.Team</td><td>@standing.Score.ToString("N0")</td></tr> }
+                </tbody></table></section>
+            }
+            <section class="panel"><h2>Activity</h2><div class="activity" role="log" aria-live="polite">
+                @foreach (var message in Player.Messages.Reverse()) { <div>@message</div> }
+                @if (Player.Messages.Length == 0) { <div>Ready when you are.</div> }
+            </div></section>
+        </div>
+    </div>
+</main>
+
+@code {
+    private string server = "https://", caPath = "", team = "", buyItem = "plot", convertTo = "money";
+    private bool insecure, bankOnly, confirmDelete;
+    private int interval = 2, maxTrees, reserve, batch = 4, plotId = 1, branchId = 1, treeId = 1, targetId = 1, buyQuantity = 1, convertAmount = 1;
+    private int? roundSeconds;
+    private bool disposed;
+    protected override void OnInitialized() => Player.Changed += Refresh;
+    private void Refresh() { if (!disposed) _ = InvokeAsync(StateHasChanged); }
+    private Task Connect() => Player.ConnectAsync(server, caPath, insecure);
+    private Task Start() => Player.StartAsync(new BotOptions(interval, maxTrees, reserve, batch, roundSeconds, bankOnly));
+    private async Task DeleteTree() { await Player.ManualAsync("delete", treeId); confirmDelete = false; }
+    private async Task PickCertificate() { if (await CertificatePicker.PickAsync() is string path) caPath = path; }
+    public void Dispose() { disposed = true; Player.Changed -= Refresh; }
+}

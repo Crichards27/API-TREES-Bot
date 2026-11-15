@@ -1,16 +1,21 @@
 # Compatibility and validation
 
-The C# client targets API Trees **0.2.0**, checked against the upstream `main`
-commit **2acf9a0b3000a12e7e2e9b9f4ffa015b08a8c109**, dated 2026-10-06
-(latest upstream HEAD inspected on 2026-10-11).
+The integration workflow pins upstream API Trees to
+**2acf9a0b3000a12e7e2e9b9f4ffa015b08a8c109** for reproducible checks.
+This is not a claim that the revision is the latest upstream release or that all
+server forks and future versions are compatible.
 
 Source: https://github.com/I-Make-Stuff/API-Trees/tree/2acf9a0b3000a12e7e2e9b9f4ffa015b08a8c109
+
+The player interface is .NET MAUI Blazor Hybrid. There is no Python or C#
+command-line player. The optional loopback web host is a dashboard development
+preview, not the persistent native player.
 
 | Behavior | C# implementation |
 | --- | --- |
 | `GET /teams`, `POST /teams/select` | Claim only in lobby; retain team, token and round ID per server |
 | `GET /me`, `/me/inventory`, `/me/plots`, `/trees` | Authenticated identity and typed orchard snapshots |
-| Plot `row`, `column`, `connected_plots` | Draw the current four-column grid using server coordinates |
+| Plot `row`, `column`, `connected_plots` | Inspect plots and tree IDs in tables with server coordinates |
 | `GET /team/{name}` with `plot_ids` | Show opponent land IDs for manual targeting |
 | `DELETE /branches/{id}` | Prune poisoned branches before harvesting |
 | `PATCH /branches/{id}` with `amount` | Harvest healthy branches on healthy trees, fullest first |
@@ -27,7 +32,7 @@ Source: https://github.com/I-Make-Stuff/API-Trees/tree/2acf9a0b3000a12e7e2e9b9f4
 ## Upstream quirks handled by the client
 
 1. `buy_market_item` deducts `quantity × price` but creates only **one plot**.
-   All bot purchases use quantity 1; both GUIs/CLI reject multi-plot requests.
+   All bot purchases use quantity 1; the dashboard rejects multi-plot requests.
 2. `get_current_game` excludes finished games, so `/teams` returns 404 after
    `/admin/end`. This is handled as a lifecycle transition, not a fatal bot error.
 3. The end-game scorer includes dead trees. The live score estimate follows it;
@@ -35,33 +40,49 @@ Source: https://github.com/I-Make-Stuff/API-Trees/tree/2acf9a0b3000a12e7e2e9b9f4
 4. `/team/{name}` is not scoped to the current game. A server retaining multiple
    rounds may return old plot IDs. Opponent snapshots are displayed with a warning;
    target IDs should be checked with the host. The bot never automatically attacks.
-5. The public API does not expose a round countdown. Optional `round-seconds`
-   means estimated seconds remaining when **this run** first observes activity.
+5. The public API does not expose a round countdown. The dashboard's optional
+   estimated seconds remaining starts when **this run** first observes activity.
    Reconnect/restart resets that estimate. The host still ends the actual round.
+6. Team selection and `/me` do not return an authoritative round ID. A changed
+   or unreadable round after selection is saved as an unconfirmed claim; the app
+   retains its token and requires explicit host-verified round association before
+   play. Authentication alone is not used to retag an old token as current.
 
-## Tests
+## Test layers and limits
 
-The portable solution is built in Release with zero compiler warnings.
-The complete suite passed **42 checks**, including the GUI controller's session
-recovery and lifecycle checks, on 2026-10-11.
-`tests/ApiTrees.Tests` is an executable regression suite, requiring no test-framework
-packages. `tests/run_integration.py` starts the actual upstream FastAPI app and
-exercises its unchanged gameplay endpoints through the C# HTTP client.
+- `ApiTrees.Portable.slnx` builds the core, shared Blazor dashboard, development
+  web host and executable regression suite without MAUI workloads.
+- `tests/ApiTrees.Tests` exercises C# behavior without test-framework packages.
+  Run the README commands and inspect their output for the current result; this
+  document does not assert an unrerun historical check count or build pass.
+- `tests/run_integration.py` launches `tests/upstream_fixture.py` and runs the C#
+  suite against the pinned upstream FastAPI application's gameplay endpoints.
+  These Python files are **test-only server infrastructure**, retained because
+  the upstream game server is Python. They are not a player or a runtime
+  dependency of the MAUI app.
+- The upstream fixture uses isolated temporary SQLite storage, deterministic
+  seed data and stubbed Redis scheduling. It does not validate PostgreSQL locking,
+  Redis timing, the full worker or a live game deployment. It binds only to
+  loopback; never expose its test administration endpoints to the LAN.
+- That fixture uses loopback HTTP, so its pass does not establish certificate
+  validation or real LAN connectivity. TLS/network checks are separate from
+  upstream gameplay checks. A local TLS test is not a native-device LAN test.
+- The C# suite also starts real loopback HTTPS servers with generated test
+  certificates. It checks PEM/DER self-signed trust, private CA trust, default
+  rejection, hostname and server-authentication usage validation, and explicit
+  per-connection bypass. It also exercises dashboard/controller round updates,
+  reconnect preservation, and refresh gates after uncertain writes.
+- Native build, interactive dashboard behavior, secure storage, certificate
+  picking and mobile lifecycle require the corresponding platform/device checks.
+  The workflow is configured to publish the Windows app; inspect the actual run
+  before claiming a successful native build or download.
 
-The integration harness uses an isolated temporary SQLite database instead of
-PostgreSQL and stubs Redis scheduling. Branches/fruit are seeded deterministically.
-It validates payloads, responses and game transitions, **not** PostgreSQL locking,
-Redis timing, the full worker or real-world TLS/network behavior. No live game
-server was supplied. Native Windows/macOS device execution needs the corresponding
-OS; the included CI workflow publishes the Windows app when pushed to GitHub.
+For self-signed LAN HTTPS, prefer the host-provided public CA/self-signed
+certificate (PEM or DER), with hostname and validity checks enabled. Explicit
+verification bypass is only for a trusted LAN, disables server authentication,
+and must never be combined with a supplied certificate. See the
+[connection guide](../README.md#lan-and-self-signed-https).
 
-A cross-build here restored the MAUI/Windows dependencies and compiled the
-shared C# code, then stopped at the Windows-only WinUI `XamlCompiler.exe` with
-an execution-format error on Linux. That does not establish a native build pass.
-The shared dashboard's initial server render and CSS are separately checked;
-headless browser execution was blocked by this environment's socket restrictions,
-so device/browser interaction and native secure storage remain platform checks.
-
-The workflow pins the tested upstream revision for reproducible checks. To check a
-future game update, clone/pull that revision and rerun the integration script;
-update the pin and this document after it passes.
+To evaluate another upstream revision, check out that exact revision and rerun
+the integration harness. Update the workflow pin and documentation only after
+checking the results; server forks can require additional coverage.

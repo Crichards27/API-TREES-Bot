@@ -24,6 +24,7 @@ public sealed class BotEngine(GameClient client)
     public event Action<string>? Log;
     public event Action<OrchardSnapshot>? Updated;
     public event Action<Results>? Finished;
+    public event Action<TeamList?>? RoundChanged;
 
     public async Task<OrchardSnapshot> SnapshotAsync(CancellationToken ct = default)
     {
@@ -91,6 +92,7 @@ public sealed class BotEngine(GameClient client)
         TeamList? round;
         try { round = await client.GetAsync<TeamList>("/teams", false, ct); }
         catch (ApiException ex) when (ex.StatusCode == 404) { round = null; }
+        RoundChanged?.Invoke(round);
         if (round?.GameId == gameId && round.Status is "active" or "lobby") return round;
         // /teams returns 404 once the host ends the game, not status=finished.
         try

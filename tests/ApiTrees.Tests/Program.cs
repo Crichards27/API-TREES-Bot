@@ -52,19 +52,32 @@ using (var client = new GameClient("https://example.test", new FakeHandler(_ => 
     await Throws<ConnectionException>(() => client.ActAsync(HttpMethod.Delete, "/trees/1"), e => e.Uncertain, "lost write response is uncertain");
 }
 
-var temporary = Path.Combine(Path.GetTempPath(), "api-trees-tests-" + Guid.NewGuid());
-try
+var cancelledHandler = new CancelledWriteHandler();
+using (var client = new GameClient("https://example.test", cancelledHandler) { Token = "token" })
+using (var cancellation = new CancellationTokenSource())
 {
-    var store = new FileSessionStore(temporary);
-    var session = new Session("https://example.test", "apple", "private-token", 7);
-    await store.SaveAsync(session);
-    Check(await store.LoadAsync(session.Server) == session, "session save/load round-trip");
-    Check(await store.LoadAsync("https://another.test") is null, "sessions are isolated by server");
-    if (!OperatingSystem.IsWindows())
-        Check(File.GetUnixFileMode(Directory.GetFiles(temporary).Single()) == (UnixFileMode.UserRead | UnixFileMode.UserWrite), "CLI tokens use owner-only file permissions");
-    Check(Directory.GetFiles(temporary).All(f => !f.EndsWith(".tmp")), "atomic session save leaves no temporary token files");
+    var write = client.ActAsync(HttpMethod.Post, "/market/buy", ct: cancellation.Token);
+    await cancelledHandler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    cancellation.Cancel();
+    await Throws<ConnectionException>(() => write,
+        e => e.Uncertain, "cancelling an in-flight write still reports an uncertain outcome");
 }
-finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }
+using (var client = new GameClient("https://example.test", new FakeHandler(_ => throw new Exception("Unexpected network request"))) { Token = "token" })
+    await Throws<OperationCanceledException>(() => client.ActAsync(HttpMethod.Post, "/market/buy", ct: new CancellationToken(true)),
+        _ => true, "already-cancelled writes stop before reaching the network");
+
+Check(SessionKeys.ForServer("HTTPS://example.test/") == SessionKeys.ForServer("https://example.test"),
+    "secure session keys normalize equivalent server addresses");
+Check(SessionKeys.ForServer("https://example.test") != SessionKeys.ForServer("https://another.test"),
+    "secure session keys isolate game servers");
+
+var legacySession = JsonSerializer.Deserialize("""{"server":"https://example.test","team":"apple","token":"token","game_id":7}""", GameJson.Default.Session)!;
+var (legacyServer, legacyTeam, legacyToken, legacyGameId) = legacySession;
+Check(!legacySession.RoundUnconfirmed && legacyGameId == 7 && legacyServer == "https://example.test" && legacyTeam == "apple" && legacyToken == "token",
+    "legacy session JSON and four-field construction/deconstruction remain compatible");
+var unconfirmedSession = legacySession with { RoundUnconfirmed = true };
+Check(JsonSerializer.Deserialize(JsonSerializer.Serialize(unconfirmedSession, GameJson.Default.Session), GameJson.Default.Session) == unconfirmedSession,
+    "unconfirmed round marker survives source-generated session serialization");
 
 var seen = new List<string>();
 using (var client = new GameClient("https://example.test", new FakeHandler(request =>
@@ -180,7 +193,20 @@ if (args is ["--integration", var server])
         Check(!player.NeedsSessionSave && player.Error is null, "GUI can retry session persistence without claiming twice");
     }
 }
+await LanRegressionChecks.RunAsync(Check);
+await TlsCertificateLifetimeChecks.RunAsync(Check);
 Console.WriteLine($"All {passed} checks passed.");
+
+sealed class CancelledWriteHandler : HttpMessageHandler
+{
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Started.TrySetResult();
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("The write should be cancelled.");
+    }
+}
 
 sealed class FakeHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> respond) : HttpMessageHandler
 {
@@ -191,7 +217,13 @@ sealed class MemoryStore : ISessionStore
 {
     private Session? session;
     public Task<Session?> LoadAsync(string server) => Task.FromResult(session?.Server == server ? session : null);
-    public Task SaveAsync(Session value) { session = value; return Task.CompletedTask; }
+    public Task SaveAsync(Session value)
+    {
+        if (FailSave) throw new IOException("Storage temporarily unavailable.");
+        session = value;
+        return Task.CompletedTask;
+    }
+    public bool FailSave { get; set; }
 }
 sealed class FailOnceStore : ISessionStore
 {

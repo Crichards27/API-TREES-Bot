@@ -20,7 +20,12 @@ public sealed record Purchase(string Item, int Quantity, int UnitPrice, int Tota
 public sealed record Harvest(int BranchId, int Harvested, int BranchFruitRemaining, int InventoryFruit);
 public sealed record Standing(int Place, string Team, int Money, int Fruit, int Trees, int Score);
 public sealed record Results(int GameId, List<string> Winners, bool Tie, List<Standing> Standings);
-public sealed record Session(string Server, string Team, string Token, int GameId);
+// With RoundUnconfirmed, GameId is only the pre-claim observation, not token identity.
+// The optional flag keeps existing saved sessions and four-argument callers compatible.
+public sealed record Session(string Server, string Team, string Token, int GameId)
+{
+    public bool RoundUnconfirmed { get; init; }
+}
 public sealed record SelectRequest(string Team);
 public sealed record AmountRequest(int Amount);
 public sealed record BuyRequest(string Item, int Quantity);

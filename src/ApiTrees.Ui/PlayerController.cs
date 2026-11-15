@@ -25,10 +25,11 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
     public bool Running { get; private set; }
     public bool Busy { get; private set; }
     public bool NeedsSessionSave { get; private set; }
+    public bool NeedsRefresh { get; private set; }
     public bool Connected => client is not null;
     public string? Error { get; private set; }
     public string[] Messages => messages.ToArray();
-    public bool CurrentSession => Session is not null && Session.GameId == Round?.GameId;
+    public bool CurrentSession => Session is { RoundUnconfirmed: false } && Session.GameId == Round?.GameId;
 
     private void Log(string message)
     {
@@ -48,50 +49,69 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
             Changed?.Invoke();
             await action();
         }
-        catch (Exception ex) { Error = ex.Message; Log(ex.Message); }
+        catch (Exception ex)
+        {
+            if (ex is ConnectionException { Uncertain: true }) NeedsRefresh = true;
+            Error = ex.Message;
+            Log(ex.Message);
+        }
         finally { Busy = false; gate.Release(); Changed?.Invoke(); }
     }
 
     public Task ConnectAsync(string server, string? caPath, bool insecure) => ExecuteAsync(async () =>
     {
         if (NeedsSessionSave) throw new InvalidOperationException("Save your claimed team session before changing the connection.");
-        client?.Dispose();
-        client = null;
-        engine = null;
-        Round = null; Session = null; Orchard = null; Results = null; Opponents = [];
         var next = new GameClient(server, string.IsNullOrWhiteSpace(caPath) ? null : caPath, insecure);
         try
         {
+            // Stage the complete connection before replacing a usable session.
             await next.GetAsync<System.Text.Json.JsonElement>("/health", false);
-            Session = await sessions.LoadAsync(next.Server);
-            try { Round = await next.GetAsync<TeamList>("/teams", false); }
+            var saved = await sessions.LoadAsync(next.Server);
+            TeamList? round = null;
+            Results? finished = null;
+            try { round = await next.GetAsync<TeamList>("/teams", false); }
             catch (ApiException ex) when (ex.StatusCode == 404)
             {
-                var results = await next.GetAsync<Results>("/results", false);
-                if (Session is null || results.GameId == Session.GameId) Results = results;
+                try { finished = await next.GetAsync<Results>("/results", false); }
+                catch (ApiException resultError) when (resultError.StatusCode == 404) { }
+                if (saved is not null && (saved.RoundUnconfirmed || finished?.GameId != saved.GameId)) finished = null;
             }
-            if (CurrentSession)
+            var current = saved is { RoundUnconfirmed: false } && saved.GameId == round?.GameId;
+            if (current)
             {
-                next.Token = Session!.Token;
+                next.Token = saved!.Token;
                 var me = await next.GetAsync<Identity>("/me");
-                if (!me.Authenticated || me.Team != Session.Team) throw new InvalidOperationException("Saved team does not match the server.");
+                if (!me.Authenticated || me.Team != saved.Team) throw new InvalidOperationException("Saved team does not match the server.");
             }
+            var nextEngine = new BotEngine(next);
+            var orchard = current ? await nextEngine.SnapshotAsync() : null;
+            var opponents = await LoadOpponentsAsync(next, round, saved?.Team);
+            nextEngine.Log += Log;
+            nextEngine.RoundChanged += updatedRound =>
+            {
+                Round = updatedRound;
+                if (!CurrentSession) { Orchard = null; Opponents = []; }
+                Changed?.Invoke();
+            };
+            nextEngine.Updated += snapshot => { Orchard = snapshot; Changed?.Invoke(); };
+            nextEngine.Finished += results => { Results = results; Changed?.Invoke(); };
+            client?.Dispose();
             client = next;
-            engine = new BotEngine(client);
-            engine.Log += Log;
-            engine.Updated += snapshot => { Orchard = snapshot; Changed?.Invoke(); };
-            engine.Finished += results => { Results = results; Round = null; Changed?.Invoke(); };
-            if (CurrentSession) Orchard = await engine.SnapshotAsync();
-            await RefreshOpponentsAsync();
+            engine = nextEngine;
+            Session = saved; Round = round; Results = finished; Orchard = orchard; Opponents = opponents;
+            NeedsRefresh = false;
             Log(CurrentSession ? $"Resumed {Session!.Team}, round {Session.GameId}." : "Connected. Choose a team in the lobby.");
             if (insecure) Log("TLS verification is disabled for this connection.");
             if (next.Server.StartsWith("http://")) Log("HTTP sends team tokens without encryption. Prefer HTTPS.");
         }
-        catch { next.Dispose(); client = null; engine = null; throw; }
+        catch { if (!ReferenceEquals(client, next)) next.Dispose(); throw; }
     });
 
     public Task ClaimAsync(string name) => ExecuteAsync(async () =>
     {
+        if (NeedsSessionSave) throw new InvalidOperationException("Save your claimed team session before claiming another team.");
+        if (Session?.RoundUnconfirmed == true) throw new InvalidOperationException("A team token was already issued. Resolve its unconfirmed round with the host; do not claim again.");
+        RequireFreshState();
         if (client is null || engine is null) throw new InvalidOperationException("Connect first.");
         Round = await client.GetAsync<TeamList>("/teams", false);
         if (CurrentSession) throw new InvalidOperationException("Your saved team already belongs to this round.");
@@ -100,11 +120,17 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
         {
             Session = ex.Session;
             NeedsSessionSave = true;
-            Orchard = await engine.SnapshotAsync();
+            Orchard = null;
             throw;
         }
+        Orchard = null;
+        if (Session.RoundUnconfirmed)
+        {
+            Log($"Claimed {Session.Team}. Token saved privately; round unconfirmed. Ask the host to verify the claim's round before recovery; do not claim again.");
+            return;
+        }
         Round = await client.GetAsync<TeamList>("/teams", false);
-        Orchard = await engine.SnapshotAsync();
+        if (CurrentSession) Orchard = await engine.SnapshotAsync();
         Log($"Claimed {Session.Team}. Token saved privately.");
     });
 
@@ -114,6 +140,26 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
         await sessions.SaveAsync(Session);
         NeedsSessionSave = false;
         Log("Team session saved privately.");
+    });
+
+    public Task ConfirmClaimRoundAsync(int gameId, bool hostVerified) => ExecuteAsync(async () =>
+    {
+        if (client is null || Session is not { RoundUnconfirmed: true }) throw new InvalidOperationException("No unconfirmed claim to recover.");
+        if (!hostVerified || gameId < 1) throw new InvalidOperationException("Ask the host to verify the claim's round and explicitly confirm a positive round ID.");
+        if (NeedsSessionSave) throw new InvalidOperationException("Save the issued token before confirming its round.");
+        client.Token = Session.Token;
+        var me = await client.GetAsync<Identity>("/me");
+        if (!me.Authenticated || me.Team != Session.Team) throw new InvalidOperationException("Claimed team does not match the server.");
+        // /me verifies the token/team ONLY. Round association is the user's
+        // explicit host-verified attestation, never inferred from authentication.
+        Session = Session with { GameId = gameId, RoundUnconfirmed = false };
+        Orchard = null;
+        Results = null;
+        NeedsRefresh = true;
+        NeedsSessionSave = true;
+        await sessions.SaveAsync(Session);
+        NeedsSessionSave = false;
+        Log($"Claim round {gameId} recorded from explicit host verification. Refresh before continuing.");
     });
 
     public Task RefreshAsync() => ExecuteAsync(async () =>
@@ -126,26 +172,31 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
         try
         {
             var results = await client.GetAsync<Results>("/results", false);
-            if (Session is null || results.GameId == Session.GameId) Results = results;
+            if (Session is null || !Session.RoundUnconfirmed && results.GameId == Session.GameId) Results = results;
         }
         catch (ApiException ex) when (ex.StatusCode == 404) { }
         await RefreshOpponentsAsync();
+        NeedsRefresh = false;
     });
 
-    private async Task RefreshOpponentsAsync()
+    private async Task RefreshOpponentsAsync() =>
+        Opponents = client is null ? [] : await LoadOpponentsAsync(client, Round, Session?.Team);
+
+    private static async Task<List<PublicTeam>> LoadOpponentsAsync(GameClient source, TeamList? round, string? ownTeam)
     {
         var opponents = new List<PublicTeam>();
-        if (client is not null && Round is not null)
-            foreach (var team in Round.Teams.Where(t => !t.Available && t.Name != Session?.Team))
+        if (round is not null)
+            foreach (var team in round.Teams.Where(t => !t.Available && t.Name != ownTeam))
             {
-                try { opponents.Add(await client.GetAsync<PublicTeam>("/team/" + Uri.EscapeDataString(team.Name), false)); }
+                try { opponents.Add(await source.GetAsync<PublicTeam>("/team/" + Uri.EscapeDataString(team.Name), false)); }
                 catch (ApiException ex) when (ex.StatusCode == 404) { }
             }
-        Opponents = opponents;
+        return opponents;
     }
 
     public Task StartAsync(BotOptions options) => ExecuteAsync(() =>
     {
+        RequireFreshState();
         options.Validate();
         if (!CurrentSession || engine is null || Session is null) throw new InvalidOperationException("Claim or resume a current team first.");
         runningCancellation?.Dispose();
@@ -157,7 +208,12 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
         {
             try { await engine.RunAsync(Session, options, token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { Log("Bot stopped. Session retained."); }
-            catch (Exception ex) { Error = ex.Message; Log("Bot stopped: " + ex.Message); }
+            catch (Exception ex)
+            {
+                if (ex is ConnectionException { Uncertain: true }) NeedsRefresh = true;
+                Error = ex.Message;
+                Log("Bot stopped: " + ex.Message);
+            }
             finally { Running = false; Changed?.Invoke(); }
         });
         return Task.CompletedTask;
@@ -171,7 +227,9 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
 
     public Task ManualAsync(string action, int id = 0, int amount = 1, string item = "plot") => ExecuteAsync(async () =>
     {
+        RequireFreshState();
         if (client is null || engine is null || Session is null) throw new InvalidOperationException("Claim a team first.");
+        if (Session.RoundUnconfirmed) throw new InvalidOperationException("Resolve the claimed token's unconfirmed round with the host before any action.");
         var round = await client.GetAsync<TeamList>("/teams", false);
         if (round.GameId != Session.GameId || round.Status != "active") throw new InvalidOperationException("Your team's round must be active.");
         if (amount < 1 || action is "plant" or "prune" or "delete" or "poison" or "molotov" && id < 1)
@@ -194,9 +252,20 @@ public sealed class PlayerController(ISessionStore sessions) : IAsyncDisposable
                 await client.ActAsync(HttpMethod.Post, "/attacks/" + action, new AttackRequest(id)); break;
             default: throw new ArgumentException("Unknown action.");
         }
-        Orchard = await engine.SnapshotAsync();
+        NeedsRefresh = true;
+        try { Orchard = await engine.SnapshotAsync(); }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Completed {action}, but orchard refresh failed. Refresh and inspect the orchard before another action. {ex.Message}", ex);
+        }
+        NeedsRefresh = false;
         Log($"Completed {action}. Orchard refreshed.");
     });
+
+    private void RequireFreshState()
+    {
+        if (NeedsRefresh) throw new InvalidOperationException("Refresh the orchard before another action; the previous write may have succeeded.");
+    }
 
     public async ValueTask DisposeAsync()
     {

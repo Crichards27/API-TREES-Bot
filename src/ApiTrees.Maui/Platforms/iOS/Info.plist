@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Connect to the API Trees game host on your local network to claim a team and play.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- Permit local hosts without relaxing certificate validation globally. -->
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIDeviceFamily</key>

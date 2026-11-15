@@ -53,7 +53,7 @@ public sealed class GameClient : IDisposable
         else if (!string.IsNullOrWhiteSpace(caCertificate))
         {
             // Parse once, fail early, and capture only public certificate bytes.
-            using var parsedRoot = X509Certificate2.CreateFromPemFile(caCertificate);
+            using var parsedRoot = X509CertificateLoader.LoadCertificateFromFile(caCertificate);
             var rootBytes = parsedRoot.RawData;
             handler.ServerCertificateCustomValidationCallback = (_, certificate, presentedChain, errors) =>
             {
@@ -64,6 +64,7 @@ public sealed class GameClient : IDisposable
                 chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 chain.ChainPolicy.CustomTrustStore.Add(root);
                 chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                chain.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));
                 if (presentedChain is not null)
                     foreach (var element in presentedChain.ChainElements.Cast<X509ChainElement>().Skip(1))
                         chain.ChainPolicy.ExtraStore.Add(element.Certificate);
@@ -89,6 +90,7 @@ public sealed class GameClient : IDisposable
         if (body is not null)
             request.Content = new StringContent(JsonSerializer.Serialize(body,
                 GameJson.Default.GetTypeInfo(body.GetType())!), Encoding.UTF8, "application/json");
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             using var response = await http.SendAsync(request, cancellationToken);
@@ -122,7 +124,8 @@ public sealed class GameClient : IDisposable
                     (write ? " Action may have succeeded; refresh state before repeating." : ""), write, ex);
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (ex is HttpRequestException ||
+            ex is OperationCanceledException && (write || !cancellationToken.IsCancellationRequested))
         {
             throw new ConnectionException("Connection failed: " + ex.Message +
                 (write ? " Action may have succeeded; refresh state before repeating." : ""), write, ex);
